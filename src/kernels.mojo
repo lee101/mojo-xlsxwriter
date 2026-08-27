@@ -1,10 +1,14 @@
 """Batched shared-string kernels for XLSX serialization."""
 
+from max.algorithm import parallelize
 from std.sys.info import simd_width_of
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
+comptime PARALLEL_THRESHOLD = 16384
+comptime ESCAPE_CHUNK = 4096
+comptime MAX_WORKERS = 8
 
 
 def strings_equal(data: BPtr, offsets: IPtr, first: Int, second: Int) -> Bool:
@@ -15,8 +19,8 @@ def strings_equal(data: BPtr, offsets: IPtr, first: Int, second: Int) -> Bool:
         return False
     var j = 0
     while j + W <= length:
-        var first_values = data.load[width=W](first_start + j)
-        var second_values = data.load[width=W](second_start + j)
+        var first_values = data.load[width=W, alignment=1](first_start + j)
+        var second_values = data.load[width=W, alignment=1](second_start + j)
         if first_values != second_values:
             return False
         j += W
@@ -55,6 +59,20 @@ def is_excel_escape(data: BPtr, position: Int, end: Int) -> Bool:
     )
 
 
+@always_inline
+def ordinary_block(data: BPtr, position: Int) -> Bool:
+    var values = data.load[width=W, alignment=1](position)
+    var special = (
+        values.le(UInt8(31))
+        | values.eq(UInt8(38))
+        | values.eq(UInt8(60))
+        | values.eq(UInt8(62))
+        | values.eq(UInt8(95))
+        | values.eq(UInt8(239))
+    )
+    return special.cast[DType.uint8]().reduce_add() == 0
+
+
 def put_literal(dst: BPtr, position: Int, literal: StringSlice) -> Int:
     var result = position
     for i in range(literal.byte_length()):
@@ -77,6 +95,10 @@ def escaped_length(data: BPtr, start: Int, end: Int) -> Int:
     var position = start
     var result = 0
     while position < end:
+        if position + W <= end and ordinary_block(data, position):
+            result += W
+            position += W
+            continue
         var value = data[position]
         if is_excel_escape(data, position, end):
             result += 13
@@ -117,6 +139,13 @@ def escape_one(data: BPtr, start: Int, end: Int, dst: BPtr, output_start: Int):
     var position = start
     var result = output_start
     while position < end:
+        if position + W <= end and ordinary_block(data, position):
+            dst.store[alignment=1](
+                result, data.load[width=W, alignment=1](position)
+            )
+            result += W
+            position += W
+            continue
         var value = data[position]
         if is_excel_escape(data, position, end):
             result = put_literal(dst, result, "_x005F")
@@ -250,62 +279,46 @@ def mxw_escape_xml(
             return -2
     var result = 0
     escaped_offsets[0] = 0
-    for index in range(count):
-        escaped_offsets[index + 1] = Int64(
-            escaped_length(data, Int(offsets[index]), Int(offsets[index + 1]))
-        )
+
+    @parameter
+    @__copy_capture(data, offsets, escaped_offsets, count)
+    def measure_chunk(chunk: Int):
+        var begin = chunk * ESCAPE_CHUNK
+        var end = min(count, begin + ESCAPE_CHUNK)
+        for index in range(begin, end):
+            escaped_offsets[index + 1] = Int64(
+                escaped_length(data, Int(offsets[index]), Int(offsets[index + 1]))
+            )
+
+    var chunks = (count + ESCAPE_CHUNK - 1) // ESCAPE_CHUNK
+    if count >= PARALLEL_THRESHOLD:
+        parallelize[measure_chunk](chunks, min(chunks, MAX_WORKERS))
+    else:
+        for chunk in range(chunks):
+            measure_chunk(chunk)
     for index in range(count):
         result += Int(escaped_offsets[index + 1])
         escaped_offsets[index + 1] = Int64(result)
     if result > dst_capacity:
         return -3
-    result = 0
-    for index in range(count):
-        var position = Int(offsets[index])
-        var end = Int(offsets[index + 1])
-        while position < end:
-            var value = data[position]
-            if is_excel_escape(data, position, end):
-                result = put_literal(dst, result, "_x005F")
-                for j in range(7):
-                    dst[result] = data[position + j]
-                    result += 1
-                position += 7
-            elif (
-                value <= UInt8(8)
-                or value == UInt8(11)
-                or value == UInt8(12)
-                or value == UInt8(13)
-                or (value >= UInt8(14) and value <= UInt8(31))
-            ):
-                result = put_control_escape(dst, result, value)
-                position += 1
-            elif value == UInt8(38):
-                result = put_literal(dst, result, "&amp;")
-                position += 1
-            elif value == UInt8(60):
-                result = put_literal(dst, result, "&lt;")
-                position += 1
-            elif value == UInt8(62):
-                result = put_literal(dst, result, "&gt;")
-                position += 1
-            elif (
-                position + 3 <= end
-                and value == UInt8(239)
-                and data[position + 1] == UInt8(191)
-                and (
-                    data[position + 2] == UInt8(190)
-                    or data[position + 2] == UInt8(191)
-                )
-            ):
-                if data[position + 2] == UInt8(190):
-                    result = put_literal(dst, result, "_xFFFE_")
-                else:
-                    result = put_literal(dst, result, "_xFFFF_")
-                position += 3
-            else:
-                dst[result] = value
-                result += 1
-                position += 1
-        escaped_offsets[index + 1] = Int64(result)
+
+    @parameter
+    @__copy_capture(data, offsets, escaped_offsets, dst, count)
+    def escape_chunk(chunk: Int):
+        var begin = chunk * ESCAPE_CHUNK
+        var end = min(count, begin + ESCAPE_CHUNK)
+        for index in range(begin, end):
+            escape_one(
+                data,
+                Int(offsets[index]),
+                Int(offsets[index + 1]),
+                dst,
+                Int(escaped_offsets[index]),
+            )
+
+    if count >= PARALLEL_THRESHOLD:
+        parallelize[escape_chunk](chunks, min(chunks, MAX_WORKERS))
+    else:
+        for chunk in range(chunks):
+            escape_chunk(chunk)
     return result

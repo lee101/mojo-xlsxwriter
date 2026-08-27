@@ -99,10 +99,11 @@ def test_xml_escape_random_scalar_and_vector_tails():
     assert escape_xml(values) == upstream_escape(values)
 
 
-def test_xml_escape_parallel_threshold_matches_upstream():
+@pytest.mark.parametrize("count", [16_383, 16_384])
+def test_xml_escape_parallel_threshold_matches_upstream(count):
     values = [
         f"{index}&<\x01_x0000_β中" if index % 11 == 0 else f"value-{index}"
-        for index in range(16_401)
+        for index in range(count)
     ]
     assert escape_xml(values) == upstream_escape(values)
 

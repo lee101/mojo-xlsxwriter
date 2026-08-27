@@ -11,9 +11,7 @@ import re
 import zipfile
 from pathlib import Path
 
-import numpy as np
-
-from ._lib import escape_xml
+from ._lib import deduplicate, escape_xml
 from .exceptions import (
     DuplicateWorksheetName,
     FileCreateError,
@@ -205,14 +203,7 @@ class Workbook:
         self._closed = True
 
     def _index_strings(self):
-        unique = list(dict.fromkeys(self._strings))
-        table = {value: identifier for identifier, value in enumerate(unique)}
-        identifiers = np.fromiter(
-            map(table.__getitem__, self._strings),
-            dtype=np.int64,
-            count=len(self._strings),
-        )
-        return identifiers, unique
+        return deduplicate(self._strings)
 
     def _write_package(self, archive, ids, unique_strings, escaped_strings):
         for index, worksheet in enumerate(self.worksheets_objs, 1):

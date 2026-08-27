@@ -6,6 +6,7 @@ import ctypes
 import os
 import subprocess
 from collections.abc import Sequence
+from itertools import chain
 
 import numpy as np
 
@@ -22,6 +23,13 @@ _library: ctypes.CDLL | None = None
 
 class BuildError(RuntimeError):
     pass
+
+
+class _StringTable(dict[str, int]):
+    def __missing__(self, value: str) -> int:
+        identifier = len(self)
+        self[value] = identifier
+        return identifier
 
 
 def build(force: bool = False) -> str:
@@ -59,10 +67,10 @@ def _addr(array: np.ndarray) -> int:
 
 def _pack(strings: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
     encoded = [value.encode("utf-8") for value in strings]
-    offsets = np.empty(len(encoded) + 1, dtype=np.int64)
-    offsets[0] = 0
-    for index, value in enumerate(encoded):
-        offsets[index + 1] = offsets[index] + len(value)
+    offsets = np.fromiter(
+        chain((0,), map(len, encoded)), dtype=np.int64, count=len(encoded) + 1
+    )
+    np.cumsum(offsets, out=offsets)
     joined = b"".join(encoded)
     if joined:
         data = np.frombuffer(joined, dtype=np.uint8)
@@ -116,12 +124,11 @@ def deduplicate(strings: Sequence[str]) -> tuple[np.ndarray, list[str]]:
     count = len(strings)
     if not count:
         return np.empty(0, dtype=np.int64), []
-    uniques = list(dict.fromkeys(strings))
-    table = {value: identifier for identifier, value in enumerate(uniques)}
+    table = _StringTable()
     identifiers = np.fromiter(
         map(table.__getitem__, strings), dtype=np.int64, count=count
     )
-    return identifiers, uniques
+    return identifiers, list(table)
 
 
 def escape_xml(strings: Sequence[str]) -> list[str]:

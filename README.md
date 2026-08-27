@@ -96,19 +96,24 @@ cell counts, and shared-string counts before printing.
 
 | case | mojo-xlsxwriter | XlsxWriter | ratio | result |
 |---|---:|---:|---:|---|
-| XML escape (300k unique) | 441.76 ms | 1270.37 ms | 2.88x | faster |
-| dedup + escape (600k strings) | 186.54 ms | 152.62 ms | 0.82x | slower |
-| XLSX: 150k x 3 strings | 2538.48 ms | 3628.16 ms | 1.43x | faster |
-| XLSX: 100k mixed rows | 2276.11 ms | 6259.38 ms | 2.75x | faster |
+| XML escape (300k unique) | 303.04 ms | 1135.28 ms | 3.75x | faster |
+| dedup + escape (600k strings) | 141.07 ms | 214.43 ms | 1.52x | faster |
+| XLSX: 150k x 3 strings | 2742.97 ms | 3227.73 ms | 1.18x | faster |
+| XLSX: 100k mixed rows | 2055.57 ms | 5559.10 ms | 2.70x | faster |
 
-Python string sequences use CPython's insertion-ordered dictionary machinery
-without first encoding every repeated value. Callers that already own packed
-UTF-8 can use the low-level Mojo dedup path with contiguous NumPy `uint8` data
-and `int64` offsets; both buffers cross the FFI boundary zero-copy. Collision
-comparisons use SIMD loads with a scalar remainder, and XML escaping switches
-from the serial kernel to bounded parallel chunks at 16,384 strings.
+Python string sequences use one-pass CPython insertion-ordered dictionary
+indexing without first encoding every repeated value. UTF-8 offset packing is
+prefix-summed in place. Callers that already own packed UTF-8 can use the
+low-level Mojo dedup path with contiguous NumPy `uint8` data and `int64`
+offsets; both buffers cross the FFI boundary zero-copy. Collision comparisons
+and ordinary XML byte runs use unaligned-safe SIMD loads with scalar remainder
+handling. XML length measurement and output switch from serial execution to
+bounded parallel chunks at 16,384 strings.
 
-No GPU path is included; this port targets CPU-side workbook serialization.
+No GPU path is included. Shared-string hashing and XML escaping are bytewise,
+variable-output operations with well under 2 arithmetic operations per byte;
+host/device transfer and compaction overhead would dominate. Workbook and ZIP
+serialization also remain CPU-side.
 
 ## How it works
 
