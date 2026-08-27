@@ -1,12 +1,10 @@
 """Batched shared-string kernels for XLSX serialization."""
 
-from std.algorithm import parallelize
 from std.sys.info import simd_width_of
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_ESCAPE_THRESHOLD = 16384
 
 
 def strings_equal(data: BPtr, offsets: IPtr, first: Int, second: Int) -> Bool:
@@ -252,42 +250,6 @@ def mxw_escape_xml(
             return -2
     var result = 0
     escaped_offsets[0] = 0
-    if count >= PARALLEL_ESCAPE_THRESHOLD:
-        var task_count = min(32, count)
-
-        @parameter
-        def measure(task: Int):
-            var first = task * count // task_count
-            var last = (task + 1) * count // task_count
-            for index in range(first, last):
-                escaped_offsets[index + 1] = Int64(
-                    escaped_length(
-                        data, Int(offsets[index]), Int(offsets[index + 1])
-                    )
-                )
-
-        parallelize[measure](task_count, task_count)
-        for index in range(count):
-            result += Int(escaped_offsets[index + 1])
-            escaped_offsets[index + 1] = Int64(result)
-        if result > dst_capacity:
-            return -3
-
-        @parameter
-        def emit(task: Int):
-            var first = task * count // task_count
-            var last = (task + 1) * count // task_count
-            for index in range(first, last):
-                escape_one(
-                    data,
-                    Int(offsets[index]),
-                    Int(offsets[index + 1]),
-                    dst,
-                    Int(escaped_offsets[index]),
-                )
-
-        parallelize[emit](task_count, task_count)
-        return result
     for index in range(count):
         escaped_offsets[index + 1] = Int64(
             escaped_length(data, Int(offsets[index]), Int(offsets[index + 1]))
